@@ -61,18 +61,16 @@ def main():
         if honesty_result["flagged_statements"]:
             print(f"    Flagged: {len(honesty_result['flagged_statements'])} statement(s)")
 
-    # Macro environment assessment — one call, reused for all dates
+    # Macro environment assessment — daily historical signals
     print("Running macro environment analysis...")
-    macro_result = macro_agent.analyze_detailed()
-    macro_signal = macro_result["score"]
-    if macro_signal == 0.0:
-        print("  Macro signal: 0.0 (neutral — no data available)")
+    macro_signals = macro_agent.analyze_historical(args.start_date, args.end_date)
+    if not macro_signals:
+        print("  Macro signals: none (no data available)")
     else:
-        print(f"  Macro signal: {macro_signal}")
-        print(f"    WTI crude:      {macro_result['wti']}")
-        print(f"    10Y yield:      {macro_result['ust_10y']}")
-        print(f"    DXY:            {macro_result['dxy']}")
-        print(f"    Jobless claims: {macro_result['claims']}")
+        vals = list(macro_signals.values())
+        avg = sum(vals) / len(vals)
+        print(f"  Got {len(macro_signals)} days of macro signals")
+        print(f"    Average: {avg:.4f}  Min: {min(vals):.4f}  Max: {max(vals):.4f}")
 
     # Combine and write results
     output_path = args.output
@@ -80,14 +78,15 @@ def main():
         f.write("date,ticker,tech_signal,news_signal,honesty_signal,macro_signal,combined_signal\n")
         for date in sorted(tech_signals):
             tech = tech_signals[date]
+            macro = macro_signals.get(date, 0.0)
             combined = round(
                 args.tech_weight * tech
                 + args.news_weight * news_signal
                 + args.honesty_weight * honesty_signal
-                + args.macro_weight * macro_signal,
+                + args.macro_weight * macro,
                 4,
             )
-            f.write(f"{date},{ticker},{tech},{news_signal},{honesty_signal},{macro_signal},{combined}\n")
+            f.write(f"{date},{ticker},{tech},{news_signal},{honesty_signal},{macro},{combined}\n")
 
     print(f"\nResults written to {output_path} ({len(tech_signals)} rows)")
 

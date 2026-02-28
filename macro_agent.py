@@ -109,6 +109,95 @@ def fetch_claims():
     return round(_momentum_signal(current, previous, _SCALE_CLAIMS), 4)
 
 
+def _historical_yf_signal(ticker, start, end, scale):
+    """Compute daily momentum signal series for a yfinance ticker. Returns pd.Series or None."""
+    df = yf.download(ticker, start=start, end=end, progress=False)
+    if df.empty:
+        return None
+    df = _flatten_columns(df)
+    close = df["Close"]
+    pct = close.pct_change(periods=_LOOKBACK_DAYS)
+    signal = pct.apply(lambda x: -math.tanh(x / scale))
+    return signal.dropna()
+
+
+def _historical_ust_signal(start, end):
+    """Compute daily 10Y yield momentum signal series. Returns pd.Series or None."""
+    df = yf.download("^TNX", start=start, end=end, progress=False)
+    if df.empty:
+        return None
+    df = _flatten_columns(df)
+    close = df["Close"]
+    change = close.diff(periods=_LOOKBACK_DAYS) / 100  # to decimal
+    signal = change.apply(lambda x: -math.tanh(x / (_SCALE_UST / 100)))
+    return signal.dropna()
+
+
+def _historical_claims_signal(start, end):
+    """Compute weekly claims momentum signal series. Returns pd.Series or None."""
+    from io import StringIO
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id=ICSA&cosd={start}"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    df = pd.read_csv(StringIO(resp.text))
+    date_col = "observation_date" if "observation_date" in df.columns else "DATE"
+    df[date_col] = pd.to_datetime(df[date_col])
+    df = df.set_index(date_col).sort_index()
+    df = df.dropna(subset=["ICSA"])
+    if len(df) < _LOOKBACK_WEEKS + 1:
+        return None
+    pct = df["ICSA"].pct_change(periods=_LOOKBACK_WEEKS)
+    signal = pct.apply(lambda x: -math.tanh(x / _SCALE_CLAIMS))
+    return signal.dropna()
+
+
+def analyze_historical(start_date, end_date):
+    """Compute daily macro signal for each trading day in [start_date, end_date].
+
+    Returns {date_string: signal} where signal is in [-1, 1].
+    Each day's signal is the equal-weight average of available indicators on that day.
+    """
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    fetch_start = (start_dt - timedelta(days=60)).strftime("%Y-%m-%d")
+
+    components = {}
+    for name, fetcher in [
+        ("wti", lambda: _historical_yf_signal("CL=F", fetch_start, end_date, _SCALE_WTI)),
+        ("ust_10y", lambda: _historical_ust_signal(fetch_start, end_date)),
+        ("dxy", lambda: _historical_yf_signal("DX-Y.NYB", fetch_start, end_date, _SCALE_DXY)),
+        ("claims", lambda: _historical_claims_signal(fetch_start, end_date)),
+    ]:
+        try:
+            series = fetcher()
+            if series is not None and len(series) > 0:
+                components[name] = series
+        except Exception:
+            pass
+
+    if not components:
+        return {}
+
+    # Combine into DataFrame; forward-fill weekly claims to daily
+    df = pd.DataFrame(components)
+    if "claims" in df.columns:
+        df["claims"] = df["claims"].ffill()
+
+    # Filter to requested range
+    df = df.loc[start_date:end_date]
+
+    # For each row, average available (non-NaN) signals
+    result = {}
+    for dt, row in df.iterrows():
+        vals = row.dropna()
+        if len(vals) > 0:
+            result[dt.strftime("%Y-%m-%d")] = round(float(vals.mean()), 4)
+
+    return result
+
+
 def analyze():
     """Public interface. Returns macro signal [-1, 1]. No ticker needed."""
     result = analyze_detailed()
